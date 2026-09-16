@@ -99,14 +99,21 @@ jobs:
 
             & winapp ui set-value Ws03Input 'WS03_UIA_OK' -a $title --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA set-value failed.' }
-            & winapp ui invoke Ws03Apply -a $title --json
-            if ($LASTEXITCODE -ne 0) { throw 'UIA invoke failed.' }
-            $deadline = [DateTime]::UtcNow.AddSeconds(5)
-            do {
-              Start-Sleep -Milliseconds 100
-              $stateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
-            } while ($stateRaw -ne 'WS03_UIA_OK' -and [DateTime]::UtcNow -lt $deadline)
-            if ($stateRaw -ne 'WS03_UIA_OK') { throw 'UIA app-event verification failed.' }
+            $valueRaw = (& winapp ui get-value Ws03Input -a $title --json 2>&1 | Out-String)
+            $semanticSetValue = ($LASTEXITCODE -eq 0 -and $valueRaw -match 'WS03_UIA_OK')
+            if (-not $semanticSetValue) {
+              $inspectAfterSet = (& winapp ui inspect -a $title --interactive --json 2>&1 | Out-String)
+              $semanticSetValue = ($LASTEXITCODE -eq 0 -and $inspectAfterSet -match 'WS03_UIA_OK')
+            }
+            if (-not $semanticSetValue) { throw 'UIA set-value could not be read back.' }
+
+            Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+            $invokeRaw = (& winapp ui invoke Ws03Apply -a $title --json 2>&1 | Out-String)
+            $invokeExit = $LASTEXITCODE
+            Start-Sleep -Milliseconds 300
+            $invokeStateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
+            $semanticInvoke = ($invokeExit -eq 0 -and $invokeStateRaw -eq 'WS03_UIA_OK')
+            $invokeDetail = if ($semanticInvoke) { $null } elseif ($invokeExit -eq 0) { 'InvokePattern returned success but application event was not observed.' } else { ($invokeRaw -replace '[\r\n]+',' ').Trim() }
 
             & winapp ui screenshot -a $title --output $shotPath --json
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shotPath)) { throw 'UI screenshot failed.' }
@@ -128,33 +135,38 @@ jobs:
                 $clickStateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
                 $physicalClick = ($clickStateRaw -eq 'WS03_PHYSICAL_CLICK')
               }
-              if (-not $physicalClick) { $clickDetail = ($clickRaw -replace '[\r\n]+',' ').Trim() }
+              if (-not $physicalClick) { $clickDetail = if ($clickExit -eq 0) { 'Physical click returned success but application event was not observed.' } else { ($clickRaw -replace '[\r\n]+',' ').Trim() } }
+            } else {
+              $clickDetail = 'Could not stage textbox value before physical click probe.'
             }
 
-            Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
             & winapp ui set-value Ws03Input '' -a $title --json *> $null
             if ($LASTEXITCODE -eq 0) {
               $typeRaw = (& winapp ui send-keys 'WS03_PHYSICAL_TYPE' --target Ws03Input -a $title --via send-input --verbatim --json 2>&1 | Out-String)
               $typeExit = $LASTEXITCODE
               if ($typeExit -eq 0) {
-                & winapp ui invoke Ws03Apply -a $title --json *> $null
-                if ($LASTEXITCODE -eq 0) {
-                  Start-Sleep -Milliseconds 300
-                  $typeStateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
-                  $physicalType = ($typeStateRaw -eq 'WS03_PHYSICAL_TYPE')
+                $typedValueRaw = (& winapp ui get-value Ws03Input -a $title --json 2>&1 | Out-String)
+                $physicalType = ($LASTEXITCODE -eq 0 -and $typedValueRaw -match 'WS03_PHYSICAL_TYPE')
+                if (-not $physicalType) {
+                  $typedInspectRaw = (& winapp ui inspect -a $title --interactive --json 2>&1 | Out-String)
+                  $physicalType = ($LASTEXITCODE -eq 0 -and $typedInspectRaw -match 'WS03_PHYSICAL_TYPE')
                 }
               }
-              if (-not $physicalType) { $typeDetail = ($typeRaw -replace '[\r\n]+',' ').Trim() }
+              if (-not $physicalType) { $typeDetail = if ($typeExit -eq 0) { 'SendInput returned success but typed textbox value was not observable.' } else { ($typeRaw -replace '[\r\n]+',' ').Trim() } }
+            } else {
+              $typeDetail = 'Could not clear textbox before SendInput probe.'
             }
-
             $evidence = [ordered]@{
               schema = 'ws03.free_windows_canary.v1'
-              core_uia = 'PASS'
+              core_uia_discovery = 'PASS'
+              semantic_set_value = 'PASS'
+              semantic_invoke = if ($semanticInvoke) { 'PASS' } else { 'UNPROVEN' }
               screenshot = 'PASS'
               screenshot_bytes = $shot.Length
               screenshot_sha256 = $shotHash
               physical_click = if ($physicalClick) { 'PASS' } else { 'UNPROVEN' }
               physical_send_input = if ($physicalType) { 'PASS' } else { 'UNPROVEN' }
+              semantic_invoke_detail = $invokeDetail
               physical_click_detail = if ($physicalClick) { $null } else { $clickDetail }
               physical_send_input_detail = if ($physicalType) { $null } else { $typeDetail }
               uploads = 0

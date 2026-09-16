@@ -64,12 +64,13 @@ jobs:
           $button.Top = 75
           $button.Width = 100
 
-          $status = New-Object System.Windows.Forms.Label
+          $status = New-Object System.Windows.Forms.TextBox
           $status.Name = 'Ws03Status'
           $status.Text = 'WAITING'
           $status.Left = 30
           $status.Top = 125
-          $status.AutoSize = $true
+          $status.Width = 430
+          $status.ReadOnly = $true
 
           $button.Add_Click({ $status.Text = $input.Text })
           $form.Controls.AddRange(@($input, $button, $status))
@@ -98,8 +99,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'UIA set-value failed.' }
             & winapp ui invoke Ws03Apply -a $title --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA invoke failed.' }
-            & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_UIA_OK' --timeout 5000 --json
-            if ($LASTEXITCODE -ne 0) { throw 'UIA state verification failed.' }
+            $stateRaw = (& winapp ui get-value Ws03Status -a $title --json 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $stateRaw -notmatch 'WS03_UIA_OK') { throw 'UIA state verification failed.' }
 
             & winapp ui screenshot -a $title --output $shotPath --json
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shotPath)) { throw 'UI screenshot failed.' }
@@ -116,8 +117,8 @@ jobs:
               $clickRaw = (& winapp ui click Ws03Apply -a $title --json 2>&1 | Out-String)
               $clickExit = $LASTEXITCODE
               if ($clickExit -eq 0) {
-                & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_PHYSICAL_CLICK' --timeout 3000 --json *> $null
-                $physicalClick = ($LASTEXITCODE -eq 0)
+                $clickStateRaw = (& winapp ui get-value Ws03Status -a $title --json 2>&1 | Out-String)
+                $physicalClick = ($LASTEXITCODE -eq 0 -and $clickStateRaw -match 'WS03_PHYSICAL_CLICK')
               }
               if (-not $physicalClick) { $clickDetail = ($clickRaw -replace '[\r\n]+',' ').Trim() }
             }

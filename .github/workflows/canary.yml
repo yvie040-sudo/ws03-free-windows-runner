@@ -1,4 +1,4 @@
-﻿name: ws03-free-windows-canary
+name: ws03-free-windows-canary
 
 on:
   workflow_dispatch:
@@ -78,6 +78,7 @@ jobs:
           '@ | Set-Content -LiteralPath $scriptPath -Encoding utf8
 
           $app = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath) -PassThru
+          $target = $app.Id.ToString()
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(20)
             do {
@@ -154,4 +155,3 @@ jobs:
             if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $scriptPath,$shotPath -Force -ErrorAction SilentlyContinue
           }
-

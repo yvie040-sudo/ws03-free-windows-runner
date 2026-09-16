@@ -40,6 +40,7 @@ jobs:
           $title = 'WS03 Free Runner Canary'
           $scriptPath = Join-Path $env:RUNNER_TEMP 'ws03-uia-target.ps1'
           $shotPath = Join-Path $env:RUNNER_TEMP 'ws03-uia.png'
+          $statusPath = Join-Path $env:RUNNER_TEMP 'ws03-uia-status.txt'
           @'
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
@@ -64,15 +65,16 @@ jobs:
           $button.Top = 75
           $button.Width = 100
 
-          $status = New-Object System.Windows.Forms.TextBox
-          $status.Name = 'Ws03Status'
-          $status.Text = 'WAITING'
+          $status = New-Object System.Windows.Forms.Label
+          $status.Text = 'Event proof is written to the runner temp directory'
           $status.Left = 30
           $status.Top = 125
-          $status.Width = 430
-          $status.ReadOnly = $true
+          $status.AutoSize = $true
 
-          $button.Add_Click({ $status.Text = $input.Text })
+          $button.Add_Click({
+            $status.Text = $input.Text
+            [System.IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'ws03-uia-status.txt'), $input.Text)
+          })
           $form.Controls.AddRange(@($input, $button, $status))
           [System.Windows.Forms.Application]::Run($form)
           '@ | Set-Content -LiteralPath $scriptPath -Encoding utf8
@@ -99,8 +101,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'UIA set-value failed.' }
             & winapp ui invoke Ws03Apply -a $title --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA invoke failed.' }
-            $stateRaw = (& winapp ui get-value Ws03Status -a $title --json 2>&1 | Out-String)
-            if ($LASTEXITCODE -ne 0 -or $stateRaw -notmatch 'WS03_UIA_OK') { throw 'UIA state verification failed.' }
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+              Start-Sleep -Milliseconds 100
+              $stateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
+            } while ($stateRaw -ne 'WS03_UIA_OK' -and [DateTime]::UtcNow -lt $deadline)
+            if ($stateRaw -ne 'WS03_UIA_OK') { throw 'UIA app-event verification failed.' }
 
             & winapp ui screenshot -a $title --output $shotPath --json
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shotPath)) { throw 'UI screenshot failed.' }
@@ -112,24 +118,31 @@ jobs:
             $clickDetail = $null
             $typeDetail = $null
 
+            Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
             & winapp ui set-value Ws03Input 'WS03_PHYSICAL_CLICK' -a $title --json *> $null
             if ($LASTEXITCODE -eq 0) {
               $clickRaw = (& winapp ui click Ws03Apply -a $title --json 2>&1 | Out-String)
               $clickExit = $LASTEXITCODE
               if ($clickExit -eq 0) {
-                $clickStateRaw = (& winapp ui get-value Ws03Status -a $title --json 2>&1 | Out-String)
-                $physicalClick = ($LASTEXITCODE -eq 0 -and $clickStateRaw -match 'WS03_PHYSICAL_CLICK')
+                Start-Sleep -Milliseconds 300
+                $clickStateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
+                $physicalClick = ($clickStateRaw -eq 'WS03_PHYSICAL_CLICK')
               }
               if (-not $physicalClick) { $clickDetail = ($clickRaw -replace '[\r\n]+',' ').Trim() }
             }
 
+            Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
             & winapp ui set-value Ws03Input '' -a $title --json *> $null
             if ($LASTEXITCODE -eq 0) {
               $typeRaw = (& winapp ui send-keys 'WS03_PHYSICAL_TYPE' --target Ws03Input -a $title --via send-input --verbatim --json 2>&1 | Out-String)
               $typeExit = $LASTEXITCODE
               if ($typeExit -eq 0) {
-                $valueRaw = (& winapp ui get-value Ws03Input -a $title --json 2>&1 | Out-String)
-                $physicalType = ($LASTEXITCODE -eq 0 -and $valueRaw -match 'WS03_PHYSICAL_TYPE')
+                & winapp ui invoke Ws03Apply -a $title --json *> $null
+                if ($LASTEXITCODE -eq 0) {
+                  Start-Sleep -Milliseconds 300
+                  $typeStateRaw = if (Test-Path $statusPath) { Get-Content -Raw -LiteralPath $statusPath } else { '' }
+                  $physicalType = ($typeStateRaw -eq 'WS03_PHYSICAL_TYPE')
+                }
               }
               if (-not $physicalType) { $typeDetail = ($typeRaw -replace '[\r\n]+',' ').Trim() }
             }
@@ -152,5 +165,5 @@ jobs:
           }
           finally {
             if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
-            Remove-Item -LiteralPath $scriptPath,$shotPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $scriptPath,$shotPath,$statusPath -Force -ErrorAction SilentlyContinue
           }

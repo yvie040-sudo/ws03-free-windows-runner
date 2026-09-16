@@ -77,27 +77,32 @@ jobs:
           [System.Windows.Forms.Application]::Run($form)
           '@ | Set-Content -LiteralPath $scriptPath -Encoding utf8
 
-          $app = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath) -WindowStyle Hidden -PassThru
+          $app = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath) -PassThru
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(20)
             do {
               Start-Sleep -Milliseconds 500
-              & winapp ui status -a $title --json *> $null
+              & winapp ui status -a $target --json *> $null
               $statusExit = $LASTEXITCODE
             } while ($statusExit -ne 0 -and [DateTime]::UtcNow -lt $deadline)
-            if ($statusExit -ne 0) { throw 'Synthetic UI target was not discoverable by UIA.' }
+            if ($statusExit -ne 0) {
+              Write-Output ('TARGET_PID=' + $app.Id + ';EXITED=' + $app.HasExited)
+              Get-Process -Id $app.Id -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,SessionId,MainWindowHandle,MainWindowTitle | Format-List
+              & winapp ui list-windows --show-hidden --json 2>&1 | Write-Output
+              throw 'Synthetic UI target was not discoverable by UIA.'
+            }
 
-            & winapp ui inspect -a $title --interactive --json
+            & winapp ui inspect -a $target --interactive --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA inspect failed.' }
 
-            & winapp ui set-value Ws03Input 'WS03_UIA_OK' -a $title --json
+            & winapp ui set-value Ws03Input 'WS03_UIA_OK' -a $target --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA set-value failed.' }
-            & winapp ui invoke Ws03Apply -a $title --json
+            & winapp ui invoke Ws03Apply -a $target --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA invoke failed.' }
-            & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_UIA_OK' --timeout 5000 --json
+            & winapp ui wait-for Ws03Status -a $target --property Name --value 'WS03_UIA_OK' --timeout 5000 --json
             if ($LASTEXITCODE -ne 0) { throw 'UIA state verification failed.' }
 
-            & winapp ui screenshot -a $title --output $shotPath --json
+            & winapp ui screenshot -a $target --output $shotPath --json
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shotPath)) { throw 'UI screenshot failed.' }
             $shot = Get-Item $shotPath
             $shotHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $shotPath).Hash.ToLowerInvariant()
@@ -107,23 +112,23 @@ jobs:
             $clickDetail = $null
             $typeDetail = $null
 
-            & winapp ui set-value Ws03Input 'WS03_PHYSICAL_CLICK' -a $title --json *> $null
+            & winapp ui set-value Ws03Input 'WS03_PHYSICAL_CLICK' -a $target --json *> $null
             if ($LASTEXITCODE -eq 0) {
-              $clickRaw = (& winapp ui click Ws03Apply -a $title --json 2>&1 | Out-String)
+              $clickRaw = (& winapp ui click Ws03Apply -a $target --json 2>&1 | Out-String)
               $clickExit = $LASTEXITCODE
               if ($clickExit -eq 0) {
-                & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_PHYSICAL_CLICK' --timeout 3000 --json *> $null
+                & winapp ui wait-for Ws03Status -a $target --property Name --value 'WS03_PHYSICAL_CLICK' --timeout 3000 --json *> $null
                 $physicalClick = ($LASTEXITCODE -eq 0)
               }
               if (-not $physicalClick) { $clickDetail = ($clickRaw -replace '[\r\n]+',' ').Trim() }
             }
 
-            & winapp ui set-value Ws03Input '' -a $title --json *> $null
+            & winapp ui set-value Ws03Input '' -a $target --json *> $null
             if ($LASTEXITCODE -eq 0) {
-              $typeRaw = (& winapp ui send-keys 'WS03_PHYSICAL_TYPE' --target Ws03Input -a $title --via send-input --verbatim --json 2>&1 | Out-String)
+              $typeRaw = (& winapp ui send-keys 'WS03_PHYSICAL_TYPE' --target Ws03Input -a $target --via send-input --verbatim --json 2>&1 | Out-String)
               $typeExit = $LASTEXITCODE
               if ($typeExit -eq 0) {
-                $valueRaw = (& winapp ui get-value Ws03Input -a $title --json 2>&1 | Out-String)
+                $valueRaw = (& winapp ui get-value Ws03Input -a $target --json 2>&1 | Out-String)
                 $physicalType = ($LASTEXITCODE -eq 0 -and $valueRaw -match 'WS03_PHYSICAL_TYPE')
               }
               if (-not $physicalType) { $typeDetail = ($typeRaw -replace '[\r\n]+',' ').Trim() }
@@ -149,3 +154,4 @@ jobs:
             if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $scriptPath,$shotPath -Force -ErrorAction SilentlyContinue
           }
+

@@ -1,0 +1,151 @@
+﻿name: ws03-free-windows-canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ws03-free-windows-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Runner provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $os = Get-CimInstance Win32_OperatingSystem
+          [ordered]@{
+            event = 'runner_provenance'
+            os_caption = $os.Caption
+            os_version = $os.Version
+            os_build = $os.BuildNumber
+            ps_version = $PSVersionTable.PSVersion.ToString()
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
+          } | ConvertTo-Json -Compress
+
+      - name: Install Microsoft WinApp CLI
+        uses: microsoft/setup-WinAppCli@cc8ea9a08b3ee3db43d5aa6bddda4a0e87d800f7 # v0.1 pinned
+
+      - name: External Windows UI canary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $title = 'WS03 Free Runner Canary'
+          $scriptPath = Join-Path $env:RUNNER_TEMP 'ws03-uia-target.ps1'
+          $shotPath = Join-Path $env:RUNNER_TEMP 'ws03-uia.png'
+          @'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $form = New-Object System.Windows.Forms.Form
+          $form.Text = 'WS03 Free Runner Canary'
+          $form.Width = 520
+          $form.Height = 230
+          $form.StartPosition = 'CenterScreen'
+
+          $input = New-Object System.Windows.Forms.TextBox
+          $input.Name = 'Ws03Input'
+          $input.AccessibleName = 'Ws03Input'
+          $input.Left = 30
+          $input.Top = 30
+          $input.Width = 430
+
+          $button = New-Object System.Windows.Forms.Button
+          $button.Name = 'Ws03Apply'
+          $button.AccessibleName = 'Ws03Apply'
+          $button.Text = 'Apply'
+          $button.Left = 30
+          $button.Top = 75
+          $button.Width = 100
+
+          $status = New-Object System.Windows.Forms.Label
+          $status.Name = 'Ws03Status'
+          $status.AccessibleName = 'Ws03Status'
+          $status.Text = 'WAITING'
+          $status.Left = 30
+          $status.Top = 125
+          $status.AutoSize = $true
+
+          $button.Add_Click({ $status.Text = $input.Text })
+          $form.Controls.AddRange(@($input, $button, $status))
+          [System.Windows.Forms.Application]::Run($form)
+          '@ | Set-Content -LiteralPath $scriptPath -Encoding utf8
+
+          $app = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath) -WindowStyle Hidden -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            do {
+              Start-Sleep -Milliseconds 500
+              & winapp ui status -a $title --json *> $null
+              $statusExit = $LASTEXITCODE
+            } while ($statusExit -ne 0 -and [DateTime]::UtcNow -lt $deadline)
+            if ($statusExit -ne 0) { throw 'Synthetic UI target was not discoverable by UIA.' }
+
+            & winapp ui inspect -a $title --interactive --json
+            if ($LASTEXITCODE -ne 0) { throw 'UIA inspect failed.' }
+
+            & winapp ui set-value Ws03Input 'WS03_UIA_OK' -a $title --json
+            if ($LASTEXITCODE -ne 0) { throw 'UIA set-value failed.' }
+            & winapp ui invoke Ws03Apply -a $title --json
+            if ($LASTEXITCODE -ne 0) { throw 'UIA invoke failed.' }
+            & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_UIA_OK' --timeout 5000 --json
+            if ($LASTEXITCODE -ne 0) { throw 'UIA state verification failed.' }
+
+            & winapp ui screenshot -a $title --output $shotPath --json
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shotPath)) { throw 'UI screenshot failed.' }
+            $shot = Get-Item $shotPath
+            $shotHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $shotPath).Hash.ToLowerInvariant()
+
+            $physicalClick = $false
+            $physicalType = $false
+            $clickDetail = $null
+            $typeDetail = $null
+
+            & winapp ui set-value Ws03Input 'WS03_PHYSICAL_CLICK' -a $title --json *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $clickRaw = (& winapp ui click Ws03Apply -a $title --json 2>&1 | Out-String)
+              $clickExit = $LASTEXITCODE
+              if ($clickExit -eq 0) {
+                & winapp ui wait-for Ws03Status -a $title --property Name --value 'WS03_PHYSICAL_CLICK' --timeout 3000 --json *> $null
+                $physicalClick = ($LASTEXITCODE -eq 0)
+              }
+              if (-not $physicalClick) { $clickDetail = ($clickRaw -replace '[\r\n]+',' ').Trim() }
+            }
+
+            & winapp ui set-value Ws03Input '' -a $title --json *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $typeRaw = (& winapp ui send-keys 'WS03_PHYSICAL_TYPE' --target Ws03Input -a $title --via send-input --verbatim --json 2>&1 | Out-String)
+              $typeExit = $LASTEXITCODE
+              if ($typeExit -eq 0) {
+                $valueRaw = (& winapp ui get-value Ws03Input -a $title --json 2>&1 | Out-String)
+                $physicalType = ($LASTEXITCODE -eq 0 -and $valueRaw -match 'WS03_PHYSICAL_TYPE')
+              }
+              if (-not $physicalType) { $typeDetail = ($typeRaw -replace '[\r\n]+',' ').Trim() }
+            }
+
+            $evidence = [ordered]@{
+              schema = 'ws03.free_windows_canary.v1'
+              core_uia = 'PASS'
+              screenshot = 'PASS'
+              screenshot_bytes = $shot.Length
+              screenshot_sha256 = $shotHash
+              physical_click = if ($physicalClick) { 'PASS' } else { 'UNPROVEN' }
+              physical_send_input = if ($physicalType) { 'PASS' } else { 'UNPROVEN' }
+              physical_click_detail = if ($physicalClick) { $null } else { $clickDetail }
+              physical_send_input_detail = if ($physicalType) { $null } else { $typeDetail }
+              uploads = 0
+              secrets_consumed = 0
+              runner = 'github-hosted/windows-2025'
+            }
+            'WS03_EVIDENCE_JSON=' + ($evidence | ConvertTo-Json -Compress)
+          }
+          finally {
+            if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $scriptPath,$shotPath -Force -ErrorAction SilentlyContinue
+          }
